@@ -1,11 +1,11 @@
 extern crate imap;
 extern crate native_tls;
-use unic_emoji_char::is_emoji;
 use chrono::{DateTime, Utc};
-use regex::Regex;
-use unicode_segmentation::UnicodeSegmentation;
 use dotenv::dotenv;
+use regex::Regex;
 use std::env;
+use unic_emoji_char::is_emoji;
+use unicode_segmentation::UnicodeSegmentation;
 
 fn main() {
     dotenv().ok();
@@ -13,28 +13,50 @@ fn main() {
 }
 
 fn fetch_inbox_top() {
-    let domain = env::vars().find(|(key, _)| key == "APP_IMAP_HOST").unwrap().1;
+    let domain = env::vars()
+        .find(|(key, _)| key == "APP_IMAP_HOST")
+        .unwrap()
+        .1;
     let domain = domain.as_str();
     let tls = native_tls::TlsConnector::builder().build().unwrap();
 
-    let port = env::vars().find(|(key, _)| key == "APP_IMAP_PORT").unwrap().1;
+    let port = env::vars()
+        .find(|(key, _)| key == "APP_IMAP_PORT")
+        .unwrap()
+        .1;
     let port = port.parse::<u16>().unwrap();
     let client = imap::connect((domain, port), domain, &tls).unwrap();
 
     let mut imap_session = client
         .login(
-            env::vars().find(|(key, _)| key == "APP_IMAP_USERNAME").unwrap().1, 
-            env::vars().find(|(key, _)| key == "APP_IMAP_PASSWORD").unwrap().1, 
+            env::vars()
+                .find(|(key, _)| key == "APP_IMAP_USERNAME")
+                .unwrap()
+                .1,
+            env::vars()
+                .find(|(key, _)| key == "APP_IMAP_PASSWORD")
+                .unwrap()
+                .1,
         )
-        .map_err(|e| e.0).unwrap();
+        .map_err(|e| e.0)
+        .unwrap();
 
     let inbox = imap_session.select("[Gmail]/All Mail").unwrap();
     let total_message_count = inbox.exists;
-    let number_of_messages_to_fetch = env::vars().find(|(key, _)| key == "APP_MAX_EMAIL_TO_FETCH").unwrap().1;
+    let number_of_messages_to_fetch = env::vars()
+        .find(|(key, _)| key == "APP_MAX_EMAIL_TO_FETCH")
+        .unwrap()
+        .1;
     let number_of_messages_to_fetch = number_of_messages_to_fetch.parse::<u32>().unwrap();
-    let sequence_set = format!("{:}:{}", total_message_count - number_of_messages_to_fetch, total_message_count);
+    let sequence_set = format!(
+        "{:}:{}",
+        total_message_count - number_of_messages_to_fetch,
+        total_message_count
+    );
 
-    let mailboxes = imap_session.list(Option::from(""), Option::from("*")).unwrap();
+    let mailboxes = imap_session
+        .list(Option::from(""), Option::from("*"))
+        .unwrap();
     for mailbox in mailboxes.iter() {
         println!("Discovered mailbox: {}", mailbox.name());
     }
@@ -62,9 +84,16 @@ fn fetch_inbox_top() {
                         let host = std::str::from_utf8(host.unwrap()).unwrap();
                         let address = format!("{mailbox}@{host}");
                         let days = duration.num_days();
-                        println!("Received from {} since {} days ago. Subject is {}", address, duration.num_days(), subject);
+                        println!(
+                            "Received from {} since {} days ago. Subject is {}",
+                            address,
+                            duration.num_days(),
+                            subject
+                        );
 
-                        let should_delete = address == "noreply@ozbargain.com.au" && days > 5;
+                        let should_delete = (address == "noreply@ozbargain.com.au"
+                            || address == "crew@morningbrew.com")
+                            && days > 5;
                         if should_delete {
                             imap_session.uid_mv(uid.to_string(), "[Gmail]/Bin").unwrap();
                             println!("Deleted email from {} with subject {}", address, subject);
