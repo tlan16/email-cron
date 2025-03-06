@@ -2,10 +2,7 @@ extern crate imap;
 extern crate native_tls;
 use chrono::{DateTime, Utc};
 use dotenv::dotenv;
-use regex::Regex;
 use std::env;
-use unic_emoji_char::is_emoji;
-use unicode_segmentation::UnicodeSegmentation;
 
 fn main() {
     dotenv().ok();
@@ -73,8 +70,9 @@ fn fetch_inbox_top() {
                 let current_time = Utc::now();
                 let parsed_date = DateTime::parse_from_rfc2822(date_str).unwrap();
                 let duration = current_time.signed_duration_since(parsed_date);
-                let subject = std::str::from_utf8(subject_bytes).unwrap();
-                let subject = cleanse_subject(subject);
+                let subject = rfc2047_decoder::decode(subject_bytes).unwrap_or(
+                    std::str::from_utf8(subject_bytes).unwrap().to_string()
+                );
 
                 for from_item in from.iter() {
                     let mailbox = from_item.mailbox.as_ref();
@@ -104,60 +102,4 @@ fn fetch_inbox_top() {
         }
     }
     imap_session.expunge().unwrap();
-}
-
-fn cleanse_subject(subject: &str) -> String {
-    let mut result = String::new();
-    // replace more than one whitespace with a single whitespace
-    let mut last_char = ' ';
-    for c in subject.chars() {
-        if c.is_whitespace() && last_char.is_whitespace() {
-            continue;
-        }
-        result.push(c);
-        last_char = c;
-    }
-    result = remove_emojis(&result);
-    result = remove_unknown_utf(&result);
-    result
-}
-
-pub fn remove_emojis(input: &str) -> String {
-    input
-        .graphemes(true)
-        .filter(|g| !is_emoji(g.parse().unwrap()))
-        .collect()
-}
-
-pub fn remove_unknown_utf(input: &str) -> String {
-    let regex = Regex::new(r"(?m)=\?UTF-\?Q\?.+=\?UTF-\?Q\?").unwrap();
-    let result1 = remove_excessive_whitespace(&*regex.replace_all(input, "").to_string());
-    if result1.len() == 0 {
-        return input.to_string();
-    }
-    let regex = Regex::new(r"(?m)_(=\w+)+\?=").unwrap();
-    let result2 = remove_excessive_whitespace(&*regex.replace_all(&result1, "").to_string());
-    if result2.len() == 0 {
-        return result1;
-    }
-
-    let regex = Regex::new(r"(?m)=\?UTF-\?.+\?=").unwrap();
-    let result3 = remove_excessive_whitespace(&*regex.replace_all(&result2, "").to_string());
-    if result3.len() == 0 {
-        return result2;
-    }
-    result3
-}
-
-pub fn remove_excessive_whitespace(input: &str) -> String {
-    let mut result = String::new();
-    let mut last_char = ' ';
-    for c in input.chars() {
-        if c.is_whitespace() && last_char.is_whitespace() {
-            continue;
-        }
-        result.push(c);
-        last_char = c;
-    }
-    result
 }
