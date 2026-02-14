@@ -6,59 +6,53 @@ use std::env;
 
 fn main() {
     dotenv().ok();
-    fetch_inbox_top();
+    match fetch_inbox_top() {
+        Ok(_) => println!("Successfully processed inbox"),
+        Err(e) => eprintln!("Error: {}", e),
+    }
 }
 
-fn fetch_inbox_top() {
-    let domain = env::vars()
-        .find(|(key, _)| key == "APP_IMAP_HOST")
-        .unwrap()
-        .1;
-    let domain = domain.as_str();
-    let tls = native_tls::TlsConnector::builder().build().unwrap();
+fn fetch_inbox_top() -> Result<(), Box<dyn std::error::Error>> {
+    let domain = env::var("APP_IMAP_HOST")
+        .map_err(|_| "APP_IMAP_HOST environment variable not set")?;
+    let tls = native_tls::TlsConnector::builder().build()?;
 
-    let port = env::vars()
-        .find(|(key, _)| key == "APP_IMAP_PORT")
-        .unwrap()
-        .1;
-    let port = port.parse::<u16>().unwrap();
-    let client = imap::connect((domain, port), domain, &tls).unwrap();
+    let port = env::var("APP_IMAP_PORT")
+        .map_err(|_| "APP_IMAP_PORT environment variable not set")?
+        .parse::<u16>()?;
 
-    let mut imap_session = client
-        .login(
-            env::vars()
-                .find(|(key, _)| key == "APP_IMAP_USERNAME")
-                .unwrap()
-                .1,
-            env::vars()
-                .find(|(key, _)| key == "APP_IMAP_PASSWORD")
-                .unwrap()
-                .1,
-        )
-        .map_err(|e| e.0)
-        .unwrap();
+    // Create address string for connection
+    let addr = format!("{}:{}", domain, port);
+    let tcp = std::net::TcpStream::connect(&addr)?;
+    let tls_stream = tls.connect(&domain, tcp)?;
+    let client = imap::Client::new(tls_stream);
 
-    let inbox = imap_session.select("[Gmail]/All Mail").unwrap();
+    let username = env::var("APP_IMAP_USERNAME")
+        .map_err(|_| "APP_IMAP_USERNAME environment variable not set")?;
+    let password = env::var("APP_IMAP_PASSWORD")
+        .map_err(|_| "APP_IMAP_PASSWORD environment variable not set")?;
+
+    let mut imap_session = client.login(username, password)
+        .map_err(|e| format!("Login failed: {}", e.0))?;
+
+    let inbox = imap_session.select("[Gmail]/All Mail")?;
     let total_message_count = inbox.exists;
-    let number_of_messages_to_fetch = env::vars()
-        .find(|(key, _)| key == "APP_MAX_EMAIL_TO_FETCH")
-        .unwrap()
-        .1;
-    let number_of_messages_to_fetch = number_of_messages_to_fetch.parse::<u32>().unwrap();
+    let number_of_messages_to_fetch = env::var("APP_MAX_EMAIL_TO_FETCH")
+        .map_err(|_| "APP_MAX_EMAIL_TO_FETCH environment variable not set")?
+        .parse::<u32>()?;
     let sequence_set = format!(
         "{:}:{}",
         total_message_count - number_of_messages_to_fetch,
         total_message_count
     );
 
-    let mailboxes = imap_session
-        .list(Option::from(""), Option::from("*"))
-        .unwrap();
-    for mailbox in mailboxes.iter() {
-        println!("Discovered mailbox: {}", mailbox.name());
+    let mailboxes = imap_session.list(Option::from(""), Option::from("*"))?;
+    for mailbox_name in mailboxes.iter() {
+        println!("Discovered mailbox: {}", mailbox_name.name());
     }
 
-    let messages = imap_session.fetch(sequence_set, "(ENVELOPE UID)").unwrap();
+    let messages = imap_session.fetch(sequence_set, "(ENVELOPE UID)")?;
+    let mut to_delete = Vec::new();
     for message in messages.iter() {
         let envelope = message.envelope();
         if let (Some(envelope), Some(uid)) = (envelope, message.uid) {
@@ -66,40 +60,50 @@ fn fetch_inbox_top() {
             let date = envelope.date.as_ref();
             let subject = envelope.subject.as_ref();
             if let (Some(from), Some(date_bytes), Some(subject_bytes)) = (from, date, subject) {
-                let date_str = std::str::from_utf8(date_bytes).unwrap();
-                let current_time = Utc::now();
-                let parsed_date = DateTime::parse_from_rfc2822(date_str).unwrap();
-                let duration = current_time.signed_duration_since(parsed_date);
-                let subject = rfc2047_decoder::decode(subject_bytes).unwrap_or(
-                    std::str::from_utf8(subject_bytes).unwrap().to_string()
-                );
-
-                for from_item in from.iter() {
-                    let mailbox = from_item.mailbox.as_ref();
-                    let host = from_item.host.as_ref();
-                    if mailbox.is_some() && host.is_some() {
-                        let mailbox = std::str::from_utf8(mailbox.unwrap()).unwrap();
-                        let host = std::str::from_utf8(host.unwrap()).unwrap();
-                        let address = format!("{mailbox}@{host}");
-                        let days = duration.num_days();
-                        println!(
-                            "Received from {} since {} days ago. Subject is {}",
-                            address,
-                            duration.num_days(),
-                            subject
+                if let Ok(date_str) = std::str::from_utf8(date_bytes) {
+                    if let Ok(parsed_date) = DateTime::parse_from_rfc2822(date_str) {
+                        let current_time = Utc::now();
+                        let duration = current_time.signed_duration_since(parsed_date);
+                        let subject = rfc2047_decoder::decode(subject_bytes).unwrap_or(
+                            std::str::from_utf8(subject_bytes).unwrap().to_string()
                         );
 
-                        let should_delete = (address == "noreply@ozbargain.com.au"
-                            || address == "crew@morningbrew.com")
-                            && days > 5;
-                        if should_delete {
-                            imap_session.uid_mv(uid.to_string(), "[Gmail]/Bin").unwrap();
-                            println!("Deleted email from {} with subject {}", address, subject);
+                        for from_item in from.iter() {
+                            let mailbox = from_item.mailbox.as_ref();
+                            let host = from_item.host.as_ref();
+                            if let (Some(mailbox_bytes), Some(host_bytes)) = (mailbox, host) {
+                                if let (Ok(mailbox), Ok(host)) = (
+                                    std::str::from_utf8(mailbox_bytes),
+                                    std::str::from_utf8(host_bytes),
+                                ) {
+                                    let address = format!("{mailbox}@{host}");
+                                    let days = duration.num_days();
+                                    println!(
+                                        "Received from {} since {} days ago. Subject is {}",
+                                        address,
+                                        duration.num_days(),
+                                        subject
+                                    );
+
+                                    let should_delete = (address == "noreply@ozbargain.com.au"
+                                        || address == "crew@morningbrew.com")
+                                        && days > 5;
+                                    if should_delete {
+                                        to_delete.push((uid, address, subject.clone()));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
-    imap_session.expunge().unwrap();
+
+    for (uid, address, subject) in to_delete {
+        imap_session.uid_mv(uid.to_string(), "[Gmail]/Bin")?;
+        println!("Deleted email from {} with subject {}", address, subject);
+    }
+    imap_session.expunge()?;
+    Ok(())
 }
